@@ -793,9 +793,17 @@ function saveData(){
 // ═══ SYNC FROM FIREBASE on startup ═══
 async function syncFromFirebase(){
   const F=_fb();if(!F)return;
-  // Users
+  // Users — merge Firebase + local so no account gets lost
   const fbUsers=await fbGet('users');
-  if(fbUsers){const arr=Object.values(fbUsers);localStorage.setItem(K.USERS,JSON.stringify(arr));users=arr;}
+  if(fbUsers){
+    const fbArr=Object.values(fbUsers);
+    const localArr=loadUsers();
+    const merged={};
+    localArr.forEach(u=>{merged[u.email.toLowerCase()]=u;});
+    fbArr.forEach(u=>{merged[u.email.toLowerCase()]=u;});
+    const finalArr=Object.values(merged);
+    localStorage.setItem(K.USERS,JSON.stringify(finalArr));users=finalArr;
+  }
   // App data
   const fbData=await fbGet('appData');
   if(fbData){localStorage.setItem(K.DATA,JSON.stringify(fbData));data=fbData;renderAll();}
@@ -966,13 +974,51 @@ function switchTab(mode){
 }
 
 // ═══ LOGIN ═══
+function _finishLogin(user,email){
+  loginAttempts[email]={count:0,lockedUntil:null};saveAttempts();
+  user.locked=false;
+  if(!user.loginHistory)user.loginHistory=[];
+  user.loginHistory.push(new Date().toISOString());
+  saveUsers(users);currentUser=user;
+  data=loadData();
+  sendLoginNotification(user);
+  enterDashboard();
+}
+
 function doLogin(){
   const email=document.getElementById('login-email').value.trim().toLowerCase();
   const pass=document.getElementById('login-pass').value;
   if(!email||!pass){showError('يرجى تعبئة جميع الحقول');return}
   if(isLocked(email)){startLock(getAtt(email).lockedUntil);return}
+
   users=loadUsers();
-  const user=users.find(u=>u.email.toLowerCase()===email);
+  let user=users.find(u=>u.email.toLowerCase()===email);
+
+  // ══ لو مش لاقيه في localStorage، اجرب تجيبه من Firebase ══
+  if(!user && window._FB_READY){
+    showError('⏳ جاري التحقق من بياناتك...');
+    syncFromFirebase().then(()=>{
+      users=loadUsers();
+      user=users.find(u=>u.email.toLowerCase()===email);
+      if(!user||user.password!==pass){
+        const a=getAtt(email);a.count++;saveAttempts();
+        if(a.count>=MAX_ATT){
+          const until=new Date(Date.now()+LOCK_MIN*60000).toISOString();
+          a.lockedUntil=until;saveAttempts();
+          showError(`❌ تم قفل الحساب لمدة ${LOCK_MIN} دقيقة`);
+          setTimeout(()=>startLock(until),500);
+        }else{
+          showError('❌ البريد الإلكتروني أو كلمة المرور غير صحيحة');
+          const el=document.getElementById('attempts-left');el.style.display='block';
+          el.textContent=`⚠️ تبقى لك ${MAX_ATT-a.count} محاولة قبل القفل`;
+        }
+        return;
+      }
+      _finishLogin(user,email);
+    });
+    return;
+  }
+
   if(!user||user.password!==pass){
     const a=getAtt(email);a.count++;saveAttempts();
     if(a.count>=MAX_ATT){
@@ -987,16 +1033,7 @@ function doLogin(){
     }
     return
   }
-  loginAttempts[email]={count:0,lockedUntil:null};saveAttempts();
-  user.locked=false;
-  // save login history
-  if(!user.loginHistory)user.loginHistory=[];
-  user.loginHistory.push(new Date().toISOString());
-  saveUsers(users);currentUser=user;
-  data=loadData();
-  // notify admin
-  sendLoginNotification(user);
-  enterDashboard()
+  _finishLogin(user,email);
 }
 
 // ═══ REGISTER ═══
